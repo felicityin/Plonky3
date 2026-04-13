@@ -18,6 +18,9 @@ mod sqrt;
 mod subfield;
 mod vectorized;
 
+pub use BasedVectorSpace as FieldExtensionAlgebra;
+// Backward-compatible aliases for the old Plonky3 API names.
+pub use PrimeCharacteristicRing as FieldAlgebra;
 pub use array::*;
 pub use batch_inverse::*;
 pub use dup::Dup;
