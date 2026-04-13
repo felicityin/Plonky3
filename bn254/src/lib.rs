@@ -19,3 +19,6 @@ pub use poseidon2::{
     BN254_POSEIDON2_HALF_FULL_ROUNDS, BN254_POSEIDON2_PARTIAL_ROUNDS_3, BN254_S_BOX_DEGREE,
     Poseidon2Bn254,
 };
+
+/// Backward-compatible alias: main branch uses `Bn254Fr` for the scalar field type.
+pub type Bn254Fr = Bn254;
