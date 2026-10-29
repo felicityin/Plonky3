@@ -228,6 +228,39 @@ where
             return F::ZERO;
         }
 
+        // Device accelerator, when one is installed (see `grind_hook`): hand it the duplex
+        // buffers and take the smallest passing witness back. `check_witness` re-verifies and
+        // applies the transcript mutation exactly as the host path would, so a wrong hook
+        // asserts loudly rather than corrupting a transcript, and a declining hook falls through
+        // to the host scan.
+        if let Some(hook) = crate::grind_hook::get() {
+            let sponge: alloc::vec::Vec<u64> = self
+                .sponge_state
+                .iter()
+                .map(|x| x.as_canonical_u64())
+                .collect();
+            let input: alloc::vec::Vec<u64> = self
+                .input_buffer
+                .iter()
+                .map(|x| x.as_canonical_u64())
+                .collect();
+            let output: alloc::vec::Vec<u64> = self
+                .output_buffer
+                .iter()
+                .map(|x| x.as_canonical_u64())
+                .collect();
+            if let Some(w) = hook(&sponge, &input, &output, bits) {
+                assert!(
+                    w < F::ORDER_U64,
+                    "grind hook returned a non-canonical witness"
+                );
+                // SAFETY: bounds-checked against the field order above.
+                let witness = unsafe { F::from_canonical_unchecked(w) };
+                assert!(self.check_witness(bits, witness));
+                return witness;
+            }
+        }
+
         // SIMD width: number of field elements processed in parallel.
         // Each SIMD lane corresponds to one candidate witness.
         let lanes = F::Packing::WIDTH;
