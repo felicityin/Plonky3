@@ -279,63 +279,69 @@ where
         // - Each SIMD lane corresponds to a distinct candidate witness
         // - All lanes share the same transcript prefix
         // - A single permutation evaluates multiple candidates in parallel
-        let witness = find_map_first(
-            0..num_batches,
-            || (),
-            |(), batch| {
-                // Compute the starting candidate for this batch.
-                //
-                // Each batch processes `F::Packing::WIDTH` candidates:
-                //   - Batch 0 -> candidates [0, 1, ..., F::Packing::WIDTH - 1]
-                //   - Batch 1 -> candidates [F::Packing::WIDTH, ..., 2 * F::Packing::WIDTH - 1]
-                //   - Batch k -> candidates [k * F::Packing::WIDTH, ..., (k+1) * F::Packing::WIDTH - 1]
-                let base = batch * lanes as u64;
+        //
+        // The search runs on a dedicated pool: it sits on the transcript's critical path and its
+        // compute is small, so queueing it in the global pool behind long parallel sections
+        // would cost far more than the search itself.
+        let witness = p3_maybe_rayon::pool::dedicated_install(8, || {
+            find_map_first(
+                0..num_batches,
+                || (),
+                |(), batch| {
+                    // Compute the starting candidate for this batch.
+                    //
+                    // Each batch processes `F::Packing::WIDTH` candidates:
+                    //   - Batch 0 -> candidates [0, 1, ..., F::Packing::WIDTH - 1]
+                    //   - Batch 1 -> candidates [F::Packing::WIDTH, ..., 2 * F::Packing::WIDTH - 1]
+                    //   - Batch k -> candidates [k * F::Packing::WIDTH, ..., (k+1) * F::Packing::WIDTH - 1]
+                    let base = batch * lanes as u64;
 
-                // Start with a copy of the precomputed base state.
-                let mut packed_state = base_packed_state;
+                    // Start with a copy of the precomputed base state.
+                    let mut packed_state = base_packed_state;
 
-                // Generate SIMD-packed candidate witnesses.
-                // Each lane receives a distinct field element.
-                //   [base + 0, base + 1, ..., base + F::Packing::WIDTH - 1]
-                let packed_witnesses = F::Packing::from_fn(|lane| {
-                    let candidate = base + lane as u64;
-                    if candidate < order {
-                        // SAFETY: candidate < field order, so this is a valid canonical field element.
-                        unsafe { F::from_canonical_unchecked(candidate) }
-                    } else {
-                        // Values outside the field order can never satisfy PoW, so we repeat the last potential witness
-                        F::NEG_ONE
-                    }
-                });
+                    // Generate SIMD-packed candidate witnesses.
+                    // Each lane receives a distinct field element.
+                    //   [base + 0, base + 1, ..., base + F::Packing::WIDTH - 1]
+                    let packed_witnesses = F::Packing::from_fn(|lane| {
+                        let candidate = base + lane as u64;
+                        if candidate < order {
+                            // SAFETY: candidate < field order, so this is a valid canonical field element.
+                            unsafe { F::from_canonical_unchecked(candidate) }
+                        } else {
+                            // Values outside the field order can never satisfy PoW, so we repeat the last potential witness
+                            F::NEG_ONE
+                        }
+                    });
 
-                // Insert the candidate witnesses at the next absorption position.
-                //
-                // This simulates absorbing `transcript || witness` before the Fiat–Shamir challenge is derived.
-                packed_state[witness_idx] = packed_witnesses;
+                    // Insert the candidate witnesses at the next absorption position.
+                    //
+                    // This simulates absorbing `transcript || witness` before the Fiat–Shamir challenge is derived.
+                    packed_state[witness_idx] = packed_witnesses;
 
-                // Apply the cryptographic permutation (SIMD version)
-                //
-                // This permutes all `lanes` candidates simultaneously.
-                self.permutation.permute_mut(&mut packed_state);
+                    // Apply the cryptographic permutation (SIMD version)
+                    //
+                    // This permutes all `lanes` candidates simultaneously.
+                    self.permutation.permute_mut(&mut packed_state);
 
-                // Check each lane for the PoW condition
-                //
-                // - In a duplex sponge, output is read from position [RATE-1] (last rate element).
-                // - We check if the low `bits` of each sample are all zeros.
-                //
-                // We scan SIMD lanes to find the first candidate whose output satisfies the PoW condition.
-                packed_state[RATE - 1]
-                    .as_slice()
-                    .iter()
-                    .zip(packed_witnesses.as_slice())
-                    .find(|(sample, _)| {
-                        // Accept if the low `bits` bits are all zero.
-                        (sample.as_canonical_u64() & mask) == 0
-                    })
-                    .map(|(_, &witness)| witness)
-            },
-        )
-        .expect("failed to find proof-of-work witness");
+                    // Check each lane for the PoW condition
+                    //
+                    // - In a duplex sponge, output is read from position [RATE-1] (last rate element).
+                    // - We check if the low `bits` of each sample are all zeros.
+                    //
+                    // We scan SIMD lanes to find the first candidate whose output satisfies the PoW condition.
+                    packed_state[RATE - 1]
+                        .as_slice()
+                        .iter()
+                        .zip(packed_witnesses.as_slice())
+                        .find(|(sample, _)| {
+                            // Accept if the low `bits` bits are all zero.
+                            (sample.as_canonical_u64() & mask) == 0
+                        })
+                        .map(|(_, &witness)| witness)
+                },
+            )
+            .expect("failed to find proof-of-work witness")
+        });
 
         // Double-check the witness using the standard verifier logic and update the challenger state.
         assert!(self.check_witness(bits, witness));
